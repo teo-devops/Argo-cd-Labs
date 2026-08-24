@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Semilla del arquetipo `stateless`, y la que usa el laboratorio por
+# defecto: la de cualquier workload cuya Application no declare
+# `argo-cd-labs.dev/arquetipo`, o que declare `stateless`.
+#
+# La forma sí importa y es común a los tres arquetipos: las Application de
+# `overlays/prod/apps/` apuntan a `path: overlays/prod`, así que un repo de
+# workload debe tener esta estructura. El contenido es una web de una página,
+# para que el ciclo Git -> Argo CD -> clúster se vea de un vistazo.
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+# El hash del nombre es lo que hace que cambiar el HTML provoque un rollout:
+# el ConfigMap pasa a llamarse distinto y el Deployment lo referencia.
+configMapGenerator:
+  - name: web-content
+    files:
+      - index.html

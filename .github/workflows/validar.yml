@@ -1,0 +1,177 @@
+# CI del plano de control.
+#
+# Aquí no se construye ni se despliega nada: quien aplica es Argo CD. Estos
+# jobs solo miran el PR y contestan dos preguntas que si no se contestarían a
+# mano, después del merge, en la UI de Argo CD:
+#
+#   validar      ¿los ficheros del workload son coherentes entre sí?
+#   render-diff  ¿qué objetos cambian de verdad en el apiserver?
+#
+# El segundo es el que sustituye al ritual de "primer sync manual y reviso el
+# diff en la UI durante una semana". Revisar el diff renderizado ANTES del merge
+# es la misma revisión, antes, y sin pagar una semana sin selfHeal por ella.
+
+name: validar
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Coherencia del plano de control. Bloqueante: un alta incoherente no se
+  # mergea.
+  # -------------------------------------------------------------------------
+  validar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # La imagen del runner ya trae bash, python3, git, kubectl y helm. No se
+      # instala nada que no haga falta: una descarga en cada job es una
+      # dependencia de red que puede caerse y tumbar el pipeline por un motivo
+      # que no tiene que ver con el cambio. Se comprueba que está lo que hace
+      # falta, y si falta se dice cuál.
+      - name: Comprobar herramientas
+        run: |
+          for req in bash python3 git kubectl helm; do
+            command -v "$req" >/dev/null || { echo "FALTA en el runner: $req"; exit 1; }
+          done
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+
+      - name: Coherencia de los workloads
+        run: python3 scripts/validar-coherencia.py
+
+      # Que todo el árbol renderice. Un kustomization roto deja la root-app
+      # "Synced" gestionando cero recursos, que es un fallo silencioso y verde.
+      - name: Renderiza el árbol
+        run: |
+          kubectl kustomize overlays/prod > /dev/null
+          kubectl kustomize bootstrap > /dev/null
+
+      # Las plantillas no se aplican nunca, pero deben ser YAML válido: si no,
+      # el fallo aparece al dar de alta un workload, no aquí. Se validan con los
+      # marcadores sustituidos, porque `NOMBRE:` sin comillas es YAML legal pero
+      # `REPO_URL` dentro de comillas simples no siempre lo sería.
+      - name: Las plantillas renderizan
+        run: |
+          python3 scripts/alta-workload.py plantilla-ci \
+            https://example.com/plantilla-ci.git \
+            --arquetipo stateless --grupo ci/plantilla --dry-run \
+            | python3 -c 'import sys,yaml; list(yaml.safe_load_all(sys.stdin))'
+
+      # El laboratorio no se aplica nunca en producción, pero su YAML debe ser
+      # válido: si no, el fallo aparece al levantarlo, no aquí. Y cada semilla
+      # de arquetipo tiene que renderizar, o `levantar.sh` sembraría un repo
+      # que Argo CD no puede sincronizar.
+      - name: El laboratorio es válido
+        run: |
+          for f in lab/kind.yaml lab/plataforma/*.yaml; do
+            python3 -c "import sys,yaml; list(yaml.safe_load_all(open(sys.argv[1])))" "$f"
+          done
+          for seed in lab/workload/seeds/*/; do
+            echo "  semilla: ${seed}"
+            kubectl kustomize "${seed}overlays/prod" > /dev/null
+          done
+
+      # Cada script se comprueba con SU intérprete, el del shebang. Usar `sh -n`
+      # sobre un script bash da un error de sintaxis que no existe: el fichero
+      # está bien y el que se equivoca es el verificador.
+      - name: Sintaxis de los scripts
+        run: |
+          for s in scripts/*.sh lab/*.sh; do
+            interprete=$(head -1 "$s" | sed -E 's|^#!\s*(/usr/bin/env\s+)?||; s|\s.*$||')
+            echo "  $s  ->  ${interprete}"
+            "$interprete" -n "$s"
+          done
+          for s in scripts/*.py; do
+            echo "  $s  ->  python3"
+            python3 -m py_compile "$s"
+          done
+
+  # -------------------------------------------------------------------------
+  # Diff de manifiestos renderizados entre la rama base y la del PR.
+  #
+  # Informativo, no bloqueante: su valor es que alguien lo lea, no que falle.
+  # -------------------------------------------------------------------------
+  render-diff:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # render-diff necesita el commit base del PR
+
+      - name: Renderizar esta rama
+        run: ./scripts/render.sh rendered/nuevo
+
+      - name: Renderizar la rama base
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          mkdir -p rendered/base
+
+          # `git archive` en vez de `git worktree`: no deja registro en .git/,
+          # que es lo que hacía fallar la segunda ejecución del job con
+          # `fatal: is a missing but already registered worktree`.
+          rm -rf /tmp/base && mkdir -p /tmp/base
+          git archive "$BASE" | tar -x -C /tmp/base
+
+          # Si el commit base tenía otra estructura —o aún no tenía render.sh—
+          # se sigue adelante sin comparación en vez de tumbar el job: esto es
+          # informativo, y un fallo aquí no dice nada del cambio que se revisa.
+          if [ -x /tmp/base/scripts/render.sh ]; then
+            /tmp/base/scripts/render.sh rendered/base || {
+              echo "El commit base no renderiza; se publica solo el render de esta rama."
+              rm -rf rendered/base; mkdir -p rendered/base
+            }
+          else
+            echo "El commit base aún no tiene scripts/render.sh; sin comparación."
+          fi
+
+      - name: Diff
+        run: |
+          echo "=========== DIFF DE MANIFIESTOS RENDERIZADOS ==========="
+          if diff -u -r rendered/base rendered/nuevo > rendered/diff.txt; then
+            echo "Sin cambios en los manifiestos aplicados al clúster."
+          else
+            cat rendered/diff.txt
+            echo "======================================================="
+            echo "Revisa este diff antes de aprobar. Es lo que Argo CD va a aplicar."
+          fi
+
+      # Comentario en el PR. No bloqueante: en un PR desde un fork el token es
+      # de solo lectura y esto no puede funcionar. El diff sigue estando en el
+      # log y en los artefactos, que ya es suficiente.
+      - name: Comentar en el PR
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [ -s rendered/diff.txt ] || exit 0
+          LINEAS=$(wc -l < rendered/diff.txt)
+          if [ "$LINEAS" -gt 400 ]; then
+            printf 'Diff de manifiestos renderizados: %s líneas, demasiadas para un comentario. Está en los artefactos del job.\n' \
+              "$LINEAS" > rendered/nota.md
+          else
+            {
+              printf 'Diff de manifiestos renderizados:\n\n```diff\n'
+              cat rendered/diff.txt
+              printf '```\n'
+            } > rendered/nota.md
+          fi
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file rendered/nota.md
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: manifiestos-renderizados
+          path: rendered/
+          retention-days: 30

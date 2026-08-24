@@ -1,0 +1,95 @@
+# ============================================================================
+# PLANTILLA — AppProject de un workload. La frontera.
+#
+# Uso:  copiar a `overlays/prod/projects/<nombre>.yaml`, sustituir los cuatro
+#       marcadores y añadir el fichero a `overlays/prod/projects/kustomization.yaml`.
+#       O dejar que `./scripts/alta-workload.sh` lo haga.
+#
+#   NOMBRE      nombre del workload = nombre del AppProject = nombre del
+#               namespace = nombre del fichero. Los cuatro iguales; lo verifica
+#               `scripts/validar-coherencia.py`.
+#   REPO_URL    URL exacta del repositorio Git del workload, con `.git`.
+#   DESCRIPCION una línea: qué es y qué componentes agrupa.
+#   GRUPO       grupo del proveedor de identidad que lo opera en la UI.
+#
+# Esta plantilla es NEUTRA respecto al tipo de workload: sirve igual para una
+# API, un job de entrenamiento, un pipeline o una herramienta interna. Lo que
+# cambia entre arquetipos vive en el repo del workload, no aquí — salvo las dos
+# excepciones que marca `plantillas/workload-application.yaml`.
+#
+# ESTE FICHERO SE ESCRIBE Y SE REVISA A MANO, siempre. No se autogenera: genera
+# el objeto que define tus propios límites de privilegio y autogenerarlo anula
+# el control que ejerce. Es también la razón por la que un ApplicationSet no
+# ahorraría este fichero (docs/aislamiento-multi-workload.md §2).
+# ============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: NOMBRE
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: DESCRIPCION
+
+  # --- 1. De qué repositorio puede leer ------------------------------------
+  # Uno solo. Si una Application de este proyecto apuntase a otro repo, Argo CD
+  # rechaza el sync antes de renderizar nada (InvalidSpecError).
+  sourceRepos:
+    - 'REPO_URL'
+
+  # --- 2. Dónde puede escribir ---------------------------------------------
+  # Un namespace exacto, sin comodín. Cualquier manifiesto del repo que declare
+  # otro namespace hace fallar el sync COMPLETO; no se despliega parcialmente.
+  destinations:
+    - server: 'https://kubernetes.default.svc'
+      namespace: NOMBRE
+
+  # --- 3. Recursos cluster-scoped: SOLO Namespace --------------------------
+  # `Namespace` es OBLIGATORIO aquí: `CreateNamespace=true` de la Application NO
+  # esquiva esta lista —el namespace se crea como tarea PreSync y se valida
+  # contra el proyecto—, así que sin esta entrada el PRIMER SYNC FALLA con
+  # `resource :Namespace is not permitted in project NOMBRE`.
+  #
+  # Cualquier entrada ADICIONAL abre permisos que nadie ha pedido, y
+  # `validar-coherencia.py` la rechaza salvo excepción declarada. Si tu workload
+  # necesita un `PersistentVolume` estático o un CRD, lee primero
+  # docs/arquetipos.md: casi siempre significa que ese recurso es de plataforma.
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+
+  # --- 4. Recursos namespaced que el workload NO puede tocar ---------------
+  # Solo RBAC: un workload no se concede permisos de API a sí mismo.
+  #
+  # CONSECUENCIA QUE HAY QUE CONOCER ANTES DE ELEGIR EL REPO DEL WORKLOAD:
+  # casi cualquier chart de terceros trae su propio ServiceAccount + Role +
+  # RoleBinding y fallará el sync contra esta lista hasta que plataforma cree
+  # ese Role a mano. Es la fricción número uno al portar software ajeno.
+  # Está pendiente de decisión explícita: docs/arquetipos.md, "Lo que sigue
+  # sin decidir".
+  namespaceResourceBlacklist:
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+
+  # --- 5. Quién lo opera en la UI de Argo CD -------------------------------
+  # INACTIVO mientras no haya un proveedor OIDC que emita el claim `groups`
+  # (`dex.config` en config/argo-cd/values.yaml, hoy comentado). Para dar acceso
+  # sin esperar al SSO se ata una cuenta local a este mismo rol desde
+  # `policy.csv`; ver docs/operar.md, "Quién puede entrar".
+  roles:
+    - name: developer
+      description: Sync y lectura sobre las Applications de NOMBRE
+      policies:
+        - p, proj:NOMBRE:developer, applications, get, NOMBRE/*, allow
+        - p, proj:NOMBRE:developer, applications, sync, NOMBRE/*, allow
+        - p, proj:NOMBRE:developer, logs, get, NOMBRE/*, allow
+      groups:
+        - GRUPO
+
+  # Avisa (sin borrar) de recursos que existen en el namespace pero no están
+  # declarados en Git — el detector de `kubectl` clandestino.
+  orphanedResources:
+    warn: true

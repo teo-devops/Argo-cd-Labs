@@ -1,0 +1,35 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root-app
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: 'https://github.com/teo-devops/Argo-cd-Labs.git'
+    targetRevision: main
+    path: overlays/prod
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      # Poda al final del sync y solo si el resto ha ido bien. Acota el daño de
+      # un render defectuoso, pero NO es lo que protege al motor: si un render
+      # deja de emitir `argo-cd.yaml`, esta poda igualmente lo borra. Lo que
+      # evita que ese borrado se lleve por delante Argo CD entero es que esa
+      # Application no lleva finalizer (ver overlays/prod/argo-cd.yaml).
+      - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

@@ -1,0 +1,90 @@
+# Un workload = una Application = un AppProject homónimo = un namespace.
+#
+# EJEMPLO del arquetipo WORKLOAD CON ESTADO (ver docs/arquetipos.md): varios
+# componentes que se despliegan y fallan juntos, con bases de datos y volúmenes
+# que sobreviven a los pods. Es el caso de uso que originó este plano de
+# control, y por eso está aquí; NO es la plantilla. Para dar de alta un workload
+# nuevo se parte de `plantillas/`, que no arrastra vocabulario de dominio.
+#
+# Los tres campos que importan (`project`, `source.repoURL`,
+# `destination.namespace`) deben coincidir con lo declarado en
+# projects/<nombre>.yaml, o Argo CD rechaza el sync — que es exactamente el
+# comportamiento que se busca. La coherencia entre los dos ficheros la comprueba
+# `scripts/validar-coherencia.py` en cada PR.
+#
+# `wiki-demo` es UN workload con dos componentes, ambos en su namespace: una
+# herramienta interna y la base de datos que solo ella usa.
+# Su repo se espera con esta forma, y `path` apunta al overlay que los agrega:
+#
+#   workload-wiki-demo/              <- el repo puede llamarse distinto
+#   ├── wiki/                        <- la aplicación
+#   ├── postgres/                    <- su base de datos
+#   └── overlays/prod/kustomization.yaml   <- agrega todo, sin Namespace
+#
+# Todos esos componentes colapsan al namespace `wiki-demo` porque se
+# despliegan y fallan juntos. Qué agrega ese overlay lo decide el repo del
+# workload, no este.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: wiki-demo
+  namespace: argocd
+  annotations:
+    # Qué siembra el laboratorio en el repo de este workload. Lo lee
+    # `lab/levantar.sh`; si falta, usa `stateless`. Ver lab/workload/seeds/.
+    argo-cd-labs.dev/arquetipo: stateful
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # El AppProject es la frontera. Nunca `default`: no restringe nada.
+  project: wiki-demo
+
+  # Agnóstico al contenido: Kustomize, Helm o YAML plano, lo que traiga el repo.
+  source:
+    # OJO AL CAMBIAR ESTA URL: la credencial de lectura es un Secret de tipo
+    # `repository` que casa por URL EXACTA, no por proyecto de la forja. Cambiarla
+    # sin crear antes la credencial de la URL nueva deja a Argo CD sin poder
+    # clonar, y el síntoma es el que peor se ve: `SYNC: Unknown` con
+    # `HEALTH: Healthy` y un `failed to list refs` enterrado en los detalles.
+    #
+    # El orden que no rompe nada —una credencial por URL, así que conviven—:
+    #   1. ./scripts/credenciales.sh anadir   con la URL nueva ya en el checkout
+    #   2. mergear
+    #   3. borrar el Secret de la URL vieja
+    repoURL: 'https://github.com/teo-devops/workload-wiki-demo.git'
+    targetRevision: main
+    path: overlays/prod
+
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: wiki-demo
+
+  syncPolicy:
+    automated:
+      # selfHeal desde el primer día: revierte cualquier `kubectl edit`. Antes
+      # se retrasaba una semana para poder revisar el primer diff renderizado
+      # en la UI; esa revisión la hace ahora el job `render-diff` de CI sobre
+      # el PR, que es donde debe estar. No tiene sentido pagar una semana sin
+      # reconciliación por una revisión que se puede hacer antes del merge.
+      selfHeal: true
+      # prune NO al nacer: mientras el workload se estabiliza, un render corto
+      # no debe llevarse por delante recursos vivos. Activarlo es un PR de una
+      # línea sobre este fichero, y queda en el historial.
+      prune: false
+    syncOptions:
+      # Argo CD crea el namespace de destino, y por eso el repo del workload no
+      # declara ninguno. OJO: esto NO esquiva el `clusterResourceWhitelist` del
+      # AppProject —el namespace se crea como tarea PreSync y se valida contra
+      # el proyecto—, así que ese whitelist tiene que permitir `Namespace` o el
+      # primer sync falla. Ver projects/wiki-demo.yaml.
+      - CreateNamespace=true
+      - ServerSideApply=true
+    managedNamespaceMetadata:
+      labels:
+        app.kubernetes.io/managed-by: argocd
+    retry:
+      limit: 3
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 10m

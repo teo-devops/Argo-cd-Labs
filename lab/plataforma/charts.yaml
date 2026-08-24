@@ -1,0 +1,67 @@
+# Repositorio de charts local: hace de `argoproj.github.io/argo-helm` dentro del
+# laboratorio, igual que Gitea hace de forja.
+#
+# POR QUÉ EXISTE
+#
+# La Application del motor es multi-source y su primera fuente es el chart de
+# Argo CD. Si el repo-server no puede descargarlo, el motor queda en `Unknown`.
+# En redes que interceptan TLS —muy común en entornos corporativos— eso pasa
+# siempre, y con un error que despista:
+#
+#   tls: failed to verify certificate: x509: certificate signed by unknown authority
+#
+# Sirviendo el chart por HTTP dentro del clúster, el laboratorio no depende de
+# la red del que lo levanta. `levantar.sh` descarga el .tgz en el host (donde sí
+# funciona), genera el index.yaml y los copia aquí.
+#
+# La forma de la Application no cambia —sigue siendo `repoURL` + `chart` +
+# `targetRevision`—: solo cambia la URL. Es la divergencia mínima respecto a
+# producción.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: charts
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: charts
+  namespace: charts
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: charts }
+  template:
+    metadata:
+      labels: { app: charts }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          # Sonda TCP, no HTTP: el directorio empieza vacío y `levantar.sh` copia
+          # el chart DESPUÉS de que el pod esté listo. Con una sonda sobre `/`,
+          # nginx responde 403 (directorio vacío, sin autoindex) y el pod nunca
+          # llegaría a Ready — un bloqueo circular.
+          readinessProbe:
+            tcpSocket: { port: 80 }
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          volumeMounts:
+            - name: repo
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: repo
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: charts
+  namespace: charts
+spec:
+  selector: { app: charts }
+  ports:
+    - { port: 80, targetPort: 80 }

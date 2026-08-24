@@ -1,0 +1,19 @@
+# El host lo reescribe `lab/levantar.sh` a `<workload>.localhost` antes de
+# sembrar: si dos workloads compartieran hostname, el Ingress se lo quedaría
+# uno de los dos y el otro fallaría en silencio.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: demo.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port: { number: 80 }

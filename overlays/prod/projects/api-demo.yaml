@@ -1,0 +1,80 @@
+# ============================================================================
+# AppProject del workload "api-demo" — su frontera en Argo CD.
+#
+# Un AppProject por workload. Es la pieza de aislamiento: restringe de qué repo
+# se lee y en qué namespace se escribe. Se escribe A MANO y se revisa a mano en
+# el PR; no se autogenera, porque generar el objeto que define tus propios
+# límites de privilegio anula el control que ejerce. Esa es también la razón
+# por la que un ApplicationSet no ahorraría este fichero: genera Application,
+# no AppProject (ver docs/aislamiento-multi-workload.md §2).
+#
+# ALCANCE DE ESTE WORKLOAD: una API stateless con su Service, su Ingress y su
+# HPA. Un solo componente, y aun así tiene su propio AppProject: el coste de la
+# frontera es el mismo para un workload de un componente que para uno de once,
+# y tenerla desde el primer día evita la conversación de "esto era pequeño, ya
+# lo aislaremos luego".
+# ============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: api-demo
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: api-demo (API stateless de ejemplo), confinada a su namespace homónimo.
+
+  # --- 1. De qué repositorio puede leer ------------------------------------
+  sourceRepos:
+    - 'https://github.com/teo-devops/workload-api-demo.git'
+
+  # --- 2. Dónde puede escribir ---------------------------------------------
+  # Un namespace exacto, sin comodín.
+  destinations:
+    - server: 'https://kubernetes.default.svc'
+      namespace: api-demo
+
+  # --- 3. Recursos cluster-scoped: SOLO Namespace --------------------------
+  # Obligatorio que esté: `CreateNamespace=true` NO esquiva esta lista, el
+  # namespace se crea como tarea PreSync y se valida contra el proyecto. El
+  # riesgo que abre y la regla de proceso que lo sostiene —el repo del workload
+  # no declara ningún objeto Namespace— están explicados en
+  # projects/wiki-demo.yaml y en docs/aislamiento-multi-workload.md §3.4.
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+
+  # --- 4. Recursos namespaced que el workload NO puede tocar ---------------
+  # Solo RBAC: un workload no se concede permisos de API a sí mismo.
+  #
+  # CONSECUENCIA CONOCIDA, y es la fricción número uno al portar cualquier chart
+  # de terceros: casi todos traen su propio ServiceAccount + Role + RoleBinding
+  # y fallarán el sync contra esta lista. Una API propia normalmente no los
+  # trae, y por eso aquí no molesta; en un workload que sí los traiga, hay que
+  # decidir. Está pendiente de decisión explícita, no olvidado:
+  # docs/arquetipos.md, "Lo que sigue sin decidir".
+  namespaceResourceBlacklist:
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+
+  # --- 5. Quién lo opera en la UI de Argo CD -------------------------------
+  # INACTIVO mientras no haya un proveedor OIDC que emita el claim `groups`
+  # (ver `dex.config` en config/argo-cd/values.yaml, hoy comentado). Para dar
+  # acceso sin esperar al SSO se ata una cuenta local a este mismo rol desde
+  # `policy.csv`; ver docs/operar.md, "Quién puede entrar".
+  roles:
+    - name: developer
+      description: Sync y lectura sobre las Applications de api-demo
+      policies:
+        - p, proj:api-demo:developer, applications, get, api-demo/*, allow
+        - p, proj:api-demo:developer, applications, sync, api-demo/*, allow
+        - p, proj:api-demo:developer, logs, get, api-demo/*, allow
+      groups:
+        - teo-devops/api-demo
+
+  # Avisa (sin borrar) de recursos que existen en el namespace pero no están
+  # declarados en Git — el detector de `kubectl` clandestino.
+  orphanedResources:
+    warn: true

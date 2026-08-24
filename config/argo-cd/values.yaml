@@ -1,0 +1,253 @@
+# ============================================================================
+# Valores del chart argo-cd (argoproj/argo-helm).
+#
+# Fuente ÚNICA de la configuración de Argo CD. Este fichero lo consumen dos
+# actores distintos y por eso no puede duplicarse:
+#
+#   1. `bootstrap/prod/install.sh` — vía `helm template -f`, una sola vez al
+#      nacer el clúster, cuando Argo CD todavía no existe.
+#   2. El propio Argo CD — vía la Application multi-source de
+#      `overlays/prod/argo-cd.yaml`, que referencia este fichero con
+#      `$values/config/argo-cd/values.yaml`.
+#
+# Cambiar Argo CD (SSO, RBAC, réplicas) es editar este fichero y abrir un PR.
+# ============================================================================
+
+# Sin esto, el chart nombra los objetos `<release>-argocd-*` (p. ej.
+# `argo-cd-argocd-repo-server`). Con el override se obtienen los nombres
+# canónicos `argocd-server`, `argocd-repo-server`… que son los que usan la
+# documentación de Argo CD, la CLI `argocd` y cualquier runbook copiado de
+# upstream. Cambiarlo más adelante renombra todos los objetos: se fija ahora.
+fullnameOverride: argocd
+
+## --- CRDs -----------------------------------------------------------------
+crds:
+  install: true
+  # No borrar los CRDs si alguna vez se desinstala el chart: si desaparecen, se
+  # pierden todas las Application y AppProject del clúster.
+  keep: true
+  annotations:
+    # ServerSideApply lo trae el chart por defecto: los CRDs de Argo CD superan
+    # el límite de 262144 bytes de la anotación del apply clásico.
+    argocd.argoproj.io/sync-options: ServerSideApply=true,Prune=false
+    argocd.argoproj.io/sync-wave: "-2"
+
+global:
+  # Hostname de la UI. Misma convención que el resto de UIs internas del clúster
+  # (Grafana, Hubble, Longhorn): un host por servicio bajo `*.${UI_DOMAIN_SUFFIX}`,
+  # servido en `/` por ingress-nginx sobre la IP de MetalLB 192.168.1.100.
+  #
+  # Con `UI_DOMAIN_SUFFIX` vacío, el suffix se deriva a <IP-con-guiones>.nip.io,
+  # que resuelve solo, sin DNS interno. Si algún día hay dominio propio, se
+  # cambia aquí Y en `configs.cm.url`, en el mismo PR: desincronizarlos rompe el
+  # login con una redirección a un sitio que no existe.
+  #
+  # Un host por servicio y no un subpath: así Argo CD se sirve en `/` y no
+  # hacen falta `server.rootpath` ni `server.basehref`, que son la fuente
+  # habitual de UIs a medio cargar.
+  domain: argocd.192-168-1-100.nip.io
+
+## --- Configuración de Argo CD ---------------------------------------------
+configs:
+  cm:
+    # URL pública EXACTA. Argo CD la usa para construir redirecciones y enlaces;
+    # si no coincide con lo que teclea el navegador, el login redirige a un
+    # sitio que no existe. Va con `global.domain`: se cambian juntas.
+    # Es `http://` a propósito — no hay TLS todavía.
+    url: http://argocd.192-168-1-100.nip.io
+
+    # Los AppProject de cada workload mapean sus `roles` a grupos del proveedor
+    # de identidad. Ese mapeo solo funciona si Dex está conectado a uno:
+    # descomentar cuando exista la OAuth Application. El conector de abajo usa
+    # GitLab como ejemplo concreto; con GitHub, Okta o Keycloak cambia el
+    # bloque `connectors`, no el resto del modelo.
+    #
+    # El clientSecret NO va aquí en claro: `$dex.gitlab.clientSecret` referencia
+    # una clave del Secret `argocd-secret`, que se crea directamente en el
+    # clúster (ver `configs.secret.createSecret` más abajo).
+    #
+    # dex.config: |
+    #   connectors:
+    #     - type: gitlab
+    #       id: gitlab
+    #       name: GitLab
+    #       config:
+    #         baseURL: https://gitlab.example.com
+    #         clientID: <client-id-de-la-oauth-app>
+    #         clientSecret: $dex.gitlab.clientSecret
+    #         groups:
+    #           - teo-devops
+
+    # Avisa en la UI de recursos presentes en el clúster que nadie declara.
+    application.resourceTrackingMethod: annotation
+
+    # --- Cuentas de usuario (FASE 2) -----------------------------------------
+    # Cuentas LOCALES: usuarios reales sin montar SSO. Es el escalón intermedio
+    # entre "solo admin" y "SSO", y sirve perfectamente para 2-5
+    # personas.
+    #
+    # Descomentar una línea por persona y darle contraseña:
+    #   argocd account update-password --account mateo \
+    #     --current-password <la-de-admin> --new-password <la-suya>
+    #
+    #   accounts.mateo: login
+    #   accounts.ana: login
+    #
+    # `login` = puede entrar por la UI. Añadir `apiKey` solo si esa cuenta
+    # necesita generar tokens para automatizar algo; no se lo des "por si acaso".
+    #
+    # Limitación que decide cuándo saltar a la fase 3: **una cuenta local no
+    # puede pertenecer a grupos**, así que cada persona necesita su propia línea
+    # en `policy.csv`. Con 3 personas se lleva bien; con 10 es cuando compensa
+    # el SSO.
+    #
+    # Cuando haya al menos una cuenta con rol de plataforma, conviene apagar
+    # `admin` para que nadie use la cuenta compartida:
+    #   admin.enabled: "false"
+
+  params:
+    # Espera mínima entre intentos de self-heal sobre la misma Application. No
+    # limita el número de intentos: evita que un recurso que no converge tenga
+    # al controller reintentando en bucle cerrado.
+    controller.self.heal.timeout.seconds: 5
+
+    # argocd-server sirve HTTP plano; quien habla con el navegador es el
+    # ingress. Sin esto, nginx hablaría HTTP contra un backend HTTPS y saldría
+    # un bucle de redirecciones (ERR_TOO_MANY_REDIRECTS), que es el fallo
+    # clásico al poner Argo CD detrás de un proxy.
+    server.insecure: true
+
+  # ==========================================================================
+  # RBAC — pensado para crecer de "solo admin" a varios usuarios sin rehacerlo.
+  #
+  # La idea: los ROLES se definen aquí una vez, y añadir gente es añadir una
+  # línea `g,` que ata un sujeto a un rol. Da igual que ese sujeto sea una
+  # cuenta local (fase 2) o un grupo del proveedor OIDC vía SSO (fase 3): el rol y sus
+  # permisos no cambian. Ver docs/operar.md, "Quién puede entrar".
+  # ==========================================================================
+  rbac:
+    create: true
+
+    # VACÍO A PROPÓSITO. No poner `role:readonly` aquí.
+    #
+    # `policy.default` se aplica a TODO usuario autenticado y, según la
+    # documentación de Argo CD, ese acceso **no se puede recortar después con
+    # una regla `deny`**. Con `role:readonly`, el día que entre el primer
+    # desarrollador vería todas las Applications de todos los workloads —
+    # justo lo que el AppProject por workload existe para evitar.
+    #
+    # Vacío significa: quien no tenga un rol explícito, no ve nada. La cuenta
+    # `admin` no se ve afectada; su acceso total es interno y no depende de
+    # esta política.
+    policy.default: ''
+
+    # Necesario para que los `groups` del token OIDC se evalúen en las reglas.
+    # Inofensivo mientras no haya SSO.
+    scopes: "[groups]"
+
+    policy.csv: |
+      # --- Roles de plataforma ---------------------------------------------
+      # Quien opera el motor: ve y sincroniza todo, incluido el propio Argo CD.
+      p, role:plataforma, applications, *, */*, allow
+      p, role:plataforma, projects, get, *, allow
+      p, role:plataforma, repositories, *, *, allow
+      p, role:plataforma, clusters, get, *, allow
+      p, role:plataforma, logs, get, */*, allow
+      p, role:plataforma, exec, create, */*, deny
+
+      # Solo mirar: útil para dar visibilidad sin capacidad de tocar nada.
+      p, role:observador, applications, get, */*, allow
+      p, role:observador, projects, get, *, allow
+      p, role:observador, logs, get, */*, allow
+
+      # --- Quién tiene cada rol ---------------------------------------------
+      # Aquí es donde se añade gente. Una línea por sujeto.
+      #
+      # FASE 2 — cuentas locales (ver `accounts.*` más arriba):
+      #   g, mateo, role:plataforma
+      #   g, ana, role:observador
+      #
+      # Acceso a UN workload: se ata al rol `developer` que ya declara su
+      # AppProject en projects/<workload>.yaml, sin tocar este fichero:
+      #   g, ana, proj:wiki-demo:developer
+      #
+      # FASE 3 — grupos del proveedor OIDC vía SSO. Misma forma, sujeto distinto:
+      #   g, teo-devops/plataforma, role:plataforma
+      #   g, teo-devops/wiki-demo, proj:wiki-demo:developer
+
+  secret:
+    # El chart genera `argocd-secret` con la contraseña de admin. Cuando entre
+    # el SSO, poner a false y crear ese Secret directamente en el
+    # clúster (contiene el clientSecret de Dex y la server signature key).
+    # Es un secreto de operación de Argo CD, de la misma capa que las
+    # credenciales `repo-*`: nunca se declara en Git.
+    createSecret: true
+
+## --- Topología ------------------------------------------------------------
+# Instalación de un solo nodo lógico. Para alta disponibilidad real:
+#   controller.replicas: 2 (shardea los clústeres gestionados)
+#   redis-ha.enabled: true (requiere 3+ nodos)
+#   server.replicas / repoServer.replicas: 2
+# No activarlo sin comprobar que el clúster tiene nodos suficientes: redis-ha
+# con anti-afinidad se queda en Pending en un clúster de un nodo.
+#
+# `metrics.enabled` solo publica el puerto y un Service ClusterIP: no arrastra
+# dependencias ni consume nada apreciable. `serviceMonitor` se queda apagado
+# porque todavía no hay Prometheus Operator en el clúster; el día que lo haya,
+# es un `true` por componente y no hay que reinstalar nada.
+#
+# Métricas que importan cuando esto crezca: `argocd_app_info` por health/sync
+# (cuántas Applications están Degraded), `argocd_app_reconcile` (si el
+# controller va sobrado o ahogado) y `argocd_git_request_duration_seconds`
+# (si el cuello de botella es la forja).
+controller:
+  replicas: 1
+  metrics:
+    enabled: true
+
+redis-ha:
+  enabled: false
+
+server:
+  replicas: 1
+  metrics:
+    enabled: true
+
+  # --- Publicación de la UI --------------------------------------------------
+  # http://argocd.192-168-1-100.nip.io — un host por servicio en `/`, como el
+  # resto de UIs internas. Ya no hace falta `kubectl port-forward`.
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    # `hostname` vacío hereda `global.domain`, que es donde está el valor y el
+    # razonamiento. No duplicarlo aquí.
+    hostname: ""
+    path: /
+    pathType: Prefix
+    # HTTP plano, igual que las demás UIs de administración del clúster: son
+    # herramientas internas, no tráfico de los workloads.
+    #
+    # La contrapartida es real y hay que tenerla presente: la contraseña de
+    # admin viaja en claro por la red del clúster. Para añadir TLS, como en el
+    # resto de UIs: anotación `cert-manager.io/cluster-issuer` y `tls: true`
+    # (nip.io es resoluble públicamente, así que el reto HTTP-01 funciona).
+    tls: false
+
+repoServer:
+  replicas: 1
+  metrics:
+    enabled: true
+
+# Generador de Applications a partir de plantillas. Se deja instalado aunque
+# hoy no se use ninguno: activarlo después obliga a un ciclo de reinstalación.
+applicationSet:
+  enabled: true
+
+# Dex es el proveedor OIDC embebido. Necesario para el SSO.
+dex:
+  enabled: true
+
+# Sin `notifications`: retirado en la primera iteración. El chart lo trae
+# activado por defecto, así que hay que apagarlo explícitamente.
+notifications:
+  enabled: false

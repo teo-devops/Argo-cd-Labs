@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: argocd
+
+# Un AppProject por workload. Añadir una línea aquí es el acto explícito de
+# conceder existencia a un workload nuevo en el clúster.
+resources:
+  - platform.yaml
+  - api-demo.yaml
+  - wiki-demo.yaml
+
+# Los AppProject se crean antes que las Applications que los referencian: una
+# Application cuyo proyecto no existe queda en error permanente.
+commonAnnotations:
+  argocd.argoproj.io/sync-wave: "0"

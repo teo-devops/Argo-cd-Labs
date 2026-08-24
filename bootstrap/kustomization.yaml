@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: argocd
+
+# ============================================================================
+# FASE 3 del bootstrap — encender el reconciliador.
+#
+# Lo aplica `scripts/install.sh` después de que la fase 2 haya esperado a que
+# los CRDs queden establecidos. No ejecutar este apply suelto: sin esa espera,
+# crear una Application es una carrera contra el apiserver.
+#
+# A partir de aquí no se vuelve a ejecutar ningún comando: la root-app lee
+# overlays/prod y todo lo demás (el motor, los AppProject y las Applications de
+# cada workload) llega por reconciliación.
+#
+# Los AppProject se siembran aquí porque la root-app declara `project: platform`
+# y una Application que referencia un proyecto inexistente queda en error
+# permanente. En cuanto la root-app sincroniza, toma posesión de estos mismos
+# objetos vía overlays/prod: el bootstrap solo los adelanta.
+# ============================================================================
+resources:
+  - ../overlays/prod/projects
+  - root-app.yaml

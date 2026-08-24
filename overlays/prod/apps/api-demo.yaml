@@ -1,0 +1,74 @@
+# Workload de ejemplo del arquetipo SERVICIO DE LARGA VIDA (ver
+# docs/arquetipos.md): una API stateless detrás de un Ingress, que converge y
+# se queda. Es el arquetipo por defecto y el más fácil de operar.
+#
+# Está aquí junto a `wiki-demo` —que es un workload de once componentes con
+# estado— para que el plano de control demuestre lo que afirma: que la frontera
+# no depende del tipo de carga. Los dos ficheros tienen la misma forma; lo único
+# que cambia es el nombre, el repo y el namespace.
+#
+# Forma esperada de su repo:
+#
+#   workload-api-demo/
+#   ├── base/                          Deployment, Service, Ingress, HPA
+#   └── overlays/prod/kustomization.yaml   <- punto de entrada, sin Namespace
+#
+# DOS TRAMPAS DE ESTE ARQUETIPO, ambas resueltas en el repo del workload y no
+# aquí (docs/arquetipos.md las desarrolla):
+#
+#   1. Si el Deployment declara `replicas` Y hay un HPA, `selfHeal` revierte
+#      cada escalado del autoscaler. La salida limpia es no declarar `replicas`
+#      en el manifiesto. Si un chart de terceros lo declara y no se puede
+#      quitar, entonces sí hace falta un `ignoreDifferences` en ESTE fichero.
+#   2. Imagen nueva = commit al repo del workload desde su propia CI. No hay
+#      Image Updater ni Kargo (README, "Estado del proyecto"): `targetRevision:
+#      main` significa "desplegar al mergear", y quien mueve el tag es la CI
+#      del workload, no este repo.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: api-demo
+  namespace: argocd
+  annotations:
+    # Qué siembra el laboratorio en el repo de este workload. Lo lee
+    # `lab/levantar.sh`, que NO conoce ningún workload de antemano: descubre
+    # los que haya en este directorio y elige su semilla por esta anotación.
+    # Si falta, el laboratorio usa `stateless`. Ver lab/workload/seeds/.
+    argo-cd-labs.dev/arquetipo: stateless
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # El AppProject es la frontera. Nunca `default`: no restringe nada.
+  project: api-demo
+
+  source:
+    # OJO AL CAMBIAR ESTA URL: la credencial de lectura es un Secret de tipo
+    # `repository` que casa por URL EXACTA. El procedimiento que no rompe nada
+    # está en apps/wiki-demo.yaml y en docs/operar.md.
+    repoURL: 'https://github.com/teo-devops/workload-api-demo.git'
+    targetRevision: main
+    path: overlays/prod
+
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: api-demo
+
+  syncPolicy:
+    automated:
+      selfHeal: true
+      # prune NO al nacer, igual que en cualquier otro workload: mientras se
+      # estabiliza, un render corto no debe llevarse por delante recursos
+      # vivos. Activarlo es un PR de una línea sobre este fichero.
+      prune: false
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    managedNamespaceMetadata:
+      labels:
+        app.kubernetes.io/managed-by: argocd
+    retry:
+      limit: 3
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 10m

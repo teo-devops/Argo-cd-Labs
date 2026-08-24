@@ -1,0 +1,13 @@
+# IDEs
+.idea/
+*.iml
+.vscode/
+
+# Ficheros temporales
+*.swp
+.DS_Store
+__pycache__/
+*.pyc
+
+# Salida de scripts/render.sh
+rendered/

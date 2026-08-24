@@ -1,0 +1,47 @@
+# AppProject de PLATAFORMA. Es el único con permisos cluster-scoped.
+# Gestiona el motor GitOps: Argo CD y los AppProject y Application de cada
+# workload.
+#
+# Ningún workload usa este proyecto. Si un workload necesitase algo de aquí, es
+# señal de que ese recurso pertenece a la plataforma, no al workload.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Infraestructura compartida del clúster gitops-prod
+
+  sourceRepos:
+    - 'https://github.com/teo-devops/Argo-cd-Labs.git'
+    # Chart oficial de Argo CD: la Application de overlays/prod/argo-cd lo usa
+    # como primera fuente. Sin esta entrada, Argo CD no puede autoinstalarse.
+    - 'https://argoproj.github.io/argo-helm'
+
+  destinations:
+    - server: 'https://kubernetes.default.svc'
+      namespace: '*'
+
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'
+
+  orphanedResources:
+    warn: true
+    # Objetos que existen legítimamente sin estar en Git y que, si no se
+    # excluyen, convierten el aviso de huérfanos en ruido permanente —y un
+    # aviso que siempre está encendido no avisa de nada.
+    ignore:
+      # Credenciales de repo, una por repositorio. NO pueden estar en Git:
+      # Argo CD las necesita para clonar el repo donde estarían. Las crean
+      # `bootstrap/prod/install.sh` (la de plataforma) y
+      # `scripts/credenciales.sh anadir` (las de cada workload).
+      - group: ''
+        kind: Secret
+        name: repo-*
+      # La genera argocd-server en el primer arranque, no el chart.
+      - group: ''
+        kind: Secret
+        name: argocd-initial-admin-secret

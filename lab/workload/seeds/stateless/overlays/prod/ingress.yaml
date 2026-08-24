@@ -1,0 +1,25 @@
+# Publica la app en http://<workload>.localhost:8088
+#
+# Va en el repo del WORKLOAD, no en el plano de control: el Ingress es parte de
+# lo que el workload declara sobre sí mismo. En producción llevaría su hostname
+# real en vez de `demo.localhost`.
+#
+# El host lo reescribe `lab/levantar.sh` a `<workload>.localhost` antes de
+# sembrar: con varios workloads sembrados del mismo arquetipo, un hostname
+# compartido se lo quedaría uno y el otro fallaría en silencio.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: demo.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port: { number: 80 }

@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ============================================================================
+# Punto de entrada del entorno: es lo que reconcilia la root-app
+# (`bootstrap/root-app.yaml` apunta a este directorio con `path: overlays/prod`).
+#
+# Todo lo que se aplica al clúster cuelga de aquí y vive DENTRO de este
+# directorio. No hay referencias hacia arriba (`../..`) a propósito: el
+# contenido de un entorno se lee de un solo sitio.
+#
+# Sin este fichero la root-app renderiza vacío y queda "Synced" gestionando
+# cero recursos — un fallo silencioso, porque el estado en la UI es verde.
+#
+# El orden lo fijan las sync-waves, no el orden de esta lista.
+# ============================================================================
+resources:
+  # Wave -2 — el motor GitOps se gestiona a sí mismo.
+  #
+  # Fichero suelto, no directorio: es un único recurso, y no puede vivir en
+  # `apps/` aunque también sea un `kind: Application`. Dos motivos:
+  #
+  #   1. `apps/kustomization.yaml` impone `sync-wave: "1"` con
+  #      commonAnnotations, y eso SOBRESCRIBE el `-2` de este fichero. El motor
+  #      se desplegaría después de los workloads que dependen de él, en
+  #      silencio y sin error.
+  #   2. El motor no es un workload: proyecto `platform`, `prune: false`
+  #      permanente y sin finalizer. `apps/` significa workloads, no "objetos
+  #      de kind Application".
+  - argo-cd.yaml
+
+  # Wave 0 — las fronteras: un AppProject por workload
+  - projects
+
+  # Wave 1 — los workloads: una Application por cada uno
+  #
+  # projects/ y apps/ están separados porque LA WAVE ES POR KIND: los
+  # AppProject siempre en 0 y las Application siempre en 1. Cada directorio la
+  # fija una vez con commonAnnotations. Agruparlos por workload obligaría a
+  # anotar fichero a fichero, y olvidarlo no da error.
+  - apps

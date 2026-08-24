@@ -1,0 +1,55 @@
+# Arquetipo `batch`: un trabajo que corre, termina y no vuelve a correr.
+#
+# Es el arquetipo que peor encaja con las reglas por defecto del plano de
+# control, y este fichero existe para poder tropezarse con ello en el
+# laboratorio en vez de en producción. Tres cosas que hay que saber:
+#
+# 1. UN JOB ES INMUTABLE. Cambiar la imagen o el comando y sincronizar da
+#    `Job.batch "..." is invalid: spec.template: field is immutable`, y la
+#    Application se queda en SyncFailed para siempre. Lo resuelve la anotación
+#    `Replace=true` de abajo, que hace que Argo CD lo borre y lo recree en vez
+#    de parchearlo. Va SOBRE EL JOB, no en la Application: allí afectaría a
+#    todos los recursos del workload.
+#
+# 2. CON `selfHeal`, BORRAR ESTE JOB EQUIVALE A RE-EJECUTARLO. Argo CD ve que
+#    falta un recurso declarado y lo recrea en el siguiente ciclo. En un
+#    Deployment eso es lo que quieres; aquí significa que un `kubectl delete
+#    job` para "limpiar" vuelve a lanzar el trabajo. Pruébalo en el laboratorio.
+#
+# 3. POR ESO NO LLEVA `ttlSecondsAfterFinished`. Es lo primero que uno añade
+#    para que los Jobs terminados no se acumulen, y con `selfHeal` activo crea
+#    un bucle: el TTL borra el Job, Argo CD lo recrea, el Job corre otra vez, el
+#    TTL lo borra… Para un trabajo que cuesta dinero —un entrenamiento— eso se
+#    nota en la factura antes que en la UI.
+#
+#    Si necesitas que no se acumulen, la salida es que cada revisión traiga un
+#    Job con NOMBRE DISTINTO (derivado del tag de la imagen o de un hash) y
+#    activar `prune: true` en la Application, no un TTL.
+#
+# Para trabajos recurrentes, un `CronJob` es mejor que un `Job`: es un objeto
+# duradero que engendra los efímeros, y encaja con GitOps sin ninguna de estas
+# tres salvedades.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trabajo
+  annotations:
+    argocd.argoproj.io/sync-options: Replace=true
+spec:
+  # Sin reintentos infinitos: si el trabajo falla por falta de un Secret, se
+  # quiere ver el fallo, no un backoff eterno.
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: trabajo
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "Arquetipo batch: este trabajo corre una vez y termina."
+              echo "Revisión sembrada por el laboratorio: v1"
+              sleep 20
+              echo "Hecho."

@@ -1,0 +1,78 @@
+# Gitea: hace de forja dentro del laboratorio.
+#
+# SQLite y un emptyDir: se destruye con el clúster y no pretende sobrevivir a
+# nada. `INSTALL_LOCK` evita el asistente de instalación inicial; el usuario y
+# los repos los crea `lab/levantar.sh`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gitea
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea
+  namespace: gitea
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: gitea }
+  template:
+    metadata:
+      labels: { app: gitea }
+    spec:
+      containers:
+        - name: gitea
+          image: gitea/gitea:1.23
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: GITEA__database__DB_TYPE, value: sqlite3 }
+            - { name: GITEA__security__INSTALL_LOCK, value: "true" }
+            - { name: GITEA__server__ROOT_URL, value: "http://gitea.localhost:8088/" }
+            - { name: GITEA__server__DOMAIN, value: "gitea.localhost" }
+            - { name: GITEA__service__DISABLE_REGISTRATION, value: "true" }
+            - { name: GITEA__repository__DEFAULT_BRANCH, value: main }
+          ports:
+            - { containerPort: 3000, name: http }
+          # Sin esto, `kubectl rollout status` da el pod por listo en cuanto el
+          # contenedor arranca, antes de que Gitea haya inicializado SQLite —y
+          # `gitea admin user create` falla en silencio. La sonda hace que
+          # "rolled out" signifique de verdad "responde".
+          readinessProbe:
+            httpGet: { path: /api/healthz, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 40
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea
+  namespace: gitea
+spec:
+  selector: { app: gitea }
+  ports:
+    - { port: 3000, targetPort: 3000 }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: gitea
+  namespace: gitea
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: gitea.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gitea
+                port: { number: 3000 }

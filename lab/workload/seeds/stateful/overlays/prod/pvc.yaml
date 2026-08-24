@@ -1,0 +1,23 @@
+# Arquetipo `stateful`: lo que sobrevive a los pods.
+#
+# `Prune=false` NO es decoración. Hoy la Application nace con `prune: false`
+# global, así que no cambia nada; el día que ese workload se estabilice y
+# alguien active `prune: true` —un PR de una línea— esta anotación es lo único
+# que separa "he renombrado el Deployment" de "he borrado el volumen".
+#
+# La regla, dicha entera: en un workload con estado, TODO PVC lleva esta
+# anotación desde el primer commit, no desde el día que se activa el prune.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: datos
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 128Mi
+  # Sin `storageClassName`: usa la clase por defecto del clúster. En kind es
+  # `standard` (local-path). En bare-metal es lo que haya montado plataforma, y
+  # ahí es donde este arquetipo deja de ser portátil sin mirar.

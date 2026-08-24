@@ -1,0 +1,46 @@
+# Escribe en el volumen la primera vez y luego sirve lo que haya en él. Que el
+# contenido sobreviva a `kubectl delete pod` es la prueba de que el estado está
+# fuera del pod, que es lo único que este arquetipo tiene que demostrar.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 1
+  # ReadWriteOnce + local-path: dos pods a la vez no pueden montar el volumen.
+  # `Recreate` mata el viejo antes de crear el nuevo; con RollingUpdate el
+  # despliegue se queda colgado en Pending y el síntoma no dice por qué.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web }
+    spec:
+      initContainers:
+        - name: sembrar
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              [ -f /datos/index.html ] && exit 0
+              echo "<h1>Arquetipo stateful</h1>
+              <p>Escrito en el volumen el $(date -u).</p>
+              <p>Borra el pod: este texto y su fecha no cambian.</p>" > /datos/index.html
+          volumeMounts:
+            - { name: datos, mountPath: /datos }
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: datos
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: datos
+          persistentVolumeClaim:
+            claimName: datos

@@ -1,0 +1,70 @@
+# ============================================================================
+# Argo CD gestionándose a sí mismo mediante su chart oficial.
+#
+# Application multi-source: la primera fuente es el chart del repositorio de
+# Helm; la segunda es ESTE repo, referenciada como `$values`, de donde sale el
+# fichero de valores. Ese `ref` es lo que evita duplicar la configuración entre
+# el bootstrap (`helm template -f config/argo-cd/values.yaml`) y el estado
+# estacionario: ambos leen el mismo fichero versionado.
+#
+# Subir de versión Argo CD = cambiar `targetRevision` aquí, en un PR.
+# ============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-cd
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+  # SIN finalizer, y es deliberado —al contrario que el resto de Applications
+  # de este repo.
+  #
+  # La root-app lleva `prune: true` y esta Application es uno de los objetos
+  # que poda. Si un cambio en overlays/prod dejase de emitir este fichero, la
+  # root-app la borraría; con el finalizer `resources-finalizer`, ese borrado
+  # arrastraría en cascada TODA la instalación de Argo CD. El `prune: false` de
+  # abajo no protege de eso: no se poda el contenido, se borra el dueño.
+  #
+  # Sin finalizer, ese mismo accidente deja los objetos de Argo CD huérfanos y
+  # funcionando, que es el fallo seguro que se busca: se recupera reponiendo el
+  # fichero, no reinstalando el clúster.
+spec:
+  project: platform
+
+  sources:
+    # renovate: datasource=helm registryUrl=https://argoproj.github.io/argo-helm
+    # chart 10.2.2 -> Argo CD v3.4.6
+    - repoURL: https://argoproj.github.io/argo-helm
+      chart: argo-cd
+      targetRevision: 10.2.2
+      helm:
+        valueFiles:
+          - $values/config/argo-cd/values.yaml
+    - repoURL: 'https://github.com/teo-devops/Argo-cd-Labs.git'
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      # selfHeal sí: revierte cualquier `kubectl edit` sobre la instalación.
+      selfHeal: true
+      # prune NO: podar el motor debe ser un acto humano deliberado. Un render
+      # corto DEL CHART no puede llevarse por delante al reconciliador que
+      # tendría que arreglarlo.
+      #
+      # Cubre solo ese camino. El otro —que la root-app pode esta Application
+      # entera— lo cubre la ausencia de finalizer, arriba.
+      prune: false
+    syncOptions:
+      - ServerSideApply=true
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

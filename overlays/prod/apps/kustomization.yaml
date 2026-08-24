@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: argocd
+
+# Una Application por workload, en `overlays/prod/apps/`. Dar de alta uno nuevo
+# = un fichero y una línea. La plantilla neutra está en `plantillas/`; los dos
+# ficheros de aquí son EJEMPLOS de arquetipos distintos, no plantillas.
+#
+# Se usan Applications planas en lugar de un ApplicationSet a propósito, y por
+# dos razones, la segunda más fuerte que la primera:
+#
+#   1. Se espera que los workloads sean HETEROGÉNEOS —repos distintos, layouts
+#      distintos, Kustomize o Helm según el equipo, arquetipos distintos—, y una
+#      plantilla única los obligaría a converger a una forma común. Servir a
+#      varios tipos de workload refuerza este argumento, no lo debilita.
+#
+#   2. Un ApplicationSet genera `Application`, NO genera `AppProject`. Y el
+#      AppProject no se autogenera a propósito (ver projects/*.yaml). Así que un
+#      generador automatizaría la mitad inofensiva del alta y dejaría la mitad
+#      peligrosa a mano: ahorra un fichero de dos.
+#
+# Un ApplicationSet compensa cuando hay N instancias de la MISMA forma —el
+# umbral práctico está en torno a 8-10 workloads de un mismo arquetipo—, o
+# cuando entre el multi-clúster. Llegado ese caso se añade uno POR ARQUETIPO
+# junto a estos ficheros, nunca uno global, y sin rehacer nada.
+resources:
+  - api-demo.yaml
+  - wiki-demo.yaml
+
+commonAnnotations:
+  argocd.argoproj.io/sync-wave: "1"
