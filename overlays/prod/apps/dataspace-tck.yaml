@@ -1,0 +1,93 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dataspace-tck
+  namespace: argocd
+  annotations:
+    # Qué siembra el laboratorio en el repo de este workload cuando levantas
+    # `lab/levantar.sh`. El laboratorio no conoce ningún workload de antemano:
+    # descubre los de `overlays/prod/apps/` y elige la semilla por esta
+    # anotación. Si falta, usa `stateless`. Ver lab/workload/seeds/.
+    argo-cd-labs.dev/arquetipo: stateless
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # El AppProject es la frontera. Nunca `default`: no restringe nada.
+  project: dataspace-tck
+
+  # Agnóstico al contenido: Kustomize, Helm o YAML plano, lo que traiga el repo.
+  source:
+    # OJO AL CAMBIAR ESTA URL: la credencial de lectura es un Secret de tipo
+    # `repository` que casa por URL EXACTA, no por proyecto de la forja.
+    # Cambiarla sin crear antes la credencial de la URL nueva deja a Argo CD sin
+    # poder clonar, con el síntoma que peor se ve: `SYNC: Unknown` con
+    # `HEALTH: Healthy` y un `failed to list refs` enterrado en los detalles.
+    #
+    # El orden que no rompe nada —una credencial por URL, así que conviven—:
+    #   1. ./scripts/credenciales.sh anadir   con la URL nueva ya en el checkout
+    #   2. mergear
+    #   3. borrar el Secret de la URL vieja
+    repoURL: 'https://github.com/teo-devops/dataspace-tck.git'
+    targetRevision: main
+    # Punto de entrada dentro del repo del workload. Es lo ÚNICO que este plano
+    # de control le impone a un repo de workload.
+    path: overlays/prod
+
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: dataspace-tck
+
+  syncPolicy:
+    automated:
+      # selfHeal desde el primer día: revierte cualquier `kubectl edit`.
+      #
+      # OJO EN EL stateless `batch`: sobre un Job terminado, selfHeal
+      # significa que BORRARLO EQUIVALE A RE-EJECUTARLO. Argo CD lo recrea en el
+      # siguiente ciclo. Ver docs/arquetipos.md.
+      selfHeal: true
+      # prune NO al nacer: mientras el workload se estabiliza, un render corto
+      # no debe llevarse por delante recursos vivos. Activarlo es un PR de una
+      # línea sobre este fichero, y queda en el historial.
+      #
+      # Cuando se active, los recursos que NO deben morir nunca —PVC, sobre
+      # todo— llevan `argocd.argoproj.io/sync-options: Prune=false` en el repo
+      # del workload. Renombrar un StatefulSet con prune activo borra su volumen.
+      prune: false
+    syncOptions:
+      # Argo CD crea el namespace de destino, y por eso el repo del workload no
+      # declara ninguno. NO esquiva el `clusterResourceWhitelist` del AppProject:
+      # ese whitelist tiene que permitir `Namespace` o el primer sync falla.
+      - CreateNamespace=true
+      - ServerSideApply=true
+    managedNamespaceMetadata:
+      labels:
+        app.kubernetes.io/managed-by: argocd
+    retry:
+      limit: 3
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 10m
+
+  # --- OPCIONAL 1 — solo si un HPA pelea con selfHeal ------------------------
+  # Si el Deployment declara `replicas` y además hay un HPA, selfHeal revierte
+  # cada escalado del autoscaler. LA SALIDA LIMPIA ES NO DECLARAR `replicas` en
+  # el repo del workload. Este bloque es el plan B, para cuando el manifiesto
+  # viene de un chart de terceros que sí lo declara y no se puede quitar:
+  #
+  # ignoreDifferences:
+  #   - group: apps
+  #     kind: Deployment
+  #     jsonPointers:
+  #       - /spec/replicas
+
+  # --- OPCIONAL 2 — solo arquetipo `batch` --------------------------------
+  # Un Job es inmutable: cambiar su imagen hace que el sync falle con
+  # `spec.template: field is immutable` y la Application queda en SyncFailed
+  # permanente. Se resuelve preferentemente en el repo del workload, anotando
+  # SOLO el Job con `argocd.argoproj.io/sync-options: Replace=true`. Ponerlo
+  # aquí lo aplica a TODOS los recursos del workload, que casi nunca es lo que
+  # se quiere:
+  #
+  #   syncOptions:
+  #     - Replace=true
