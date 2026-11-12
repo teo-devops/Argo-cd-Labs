@@ -1,0 +1,71 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: dataspace-tck
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: dataspace-tck (TCK de interoperabilidad para conectores de espacios de datos, servicio público), confinado a su namespace homónimo.
+
+  # --- 1. De qué repositorio puede leer ------------------------------------
+  # Uno solo. Si una Application de este proyecto apuntase a otro repo, Argo CD
+  # rechaza el sync antes de renderizar nada (InvalidSpecError).
+  sourceRepos:
+    - 'https://github.com/teo-devops/dataspace-tck.git'
+
+  # --- 2. Dónde puede escribir ---------------------------------------------
+  # Un namespace exacto, sin comodín. Cualquier manifiesto del repo que declare
+  # otro namespace hace fallar el sync COMPLETO; no se despliega parcialmente.
+  destinations:
+    - server: 'https://kubernetes.default.svc'
+      namespace: dataspace-tck
+
+  # --- 3. Recursos cluster-scoped: SOLO Namespace --------------------------
+  # `Namespace` es OBLIGATORIO aquí: `CreateNamespace=true` de la Application NO
+  # esquiva esta lista —el namespace se crea como tarea PreSync y se valida
+  # contra el proyecto—, así que sin esta entrada el PRIMER SYNC FALLA con
+  # `resource :Namespace is not permitted in project dataspace-tck`.
+  #
+  # Cualquier entrada ADICIONAL abre permisos que nadie ha pedido, y
+  # `validar-coherencia.py` la rechaza salvo excepción declarada. Si tu workload
+  # necesita un `PersistentVolume` estático o un CRD, lee primero
+  # docs/arquetipos.md: casi siempre significa que ese recurso es de plataforma.
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+
+  # --- 4. Recursos namespaced que el workload NO puede tocar ---------------
+  # Solo RBAC: un workload no se concede permisos de API a sí mismo.
+  #
+  # CONSECUENCIA QUE HAY QUE CONOCER ANTES DE ELEGIR EL REPO DEL WORKLOAD:
+  # casi cualquier chart de terceros trae su propio ServiceAccount + Role +
+  # RoleBinding y fallará el sync contra esta lista hasta que plataforma cree
+  # ese Role a mano. Es la fricción número uno al portar software ajeno.
+  # Está pendiente de decisión explícita: docs/arquetipos.md, "Lo que sigue
+  # sin decidir".
+  namespaceResourceBlacklist:
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+
+  # --- 5. Quién lo opera en la UI de Argo CD -------------------------------
+  # INACTIVO mientras no haya un proveedor OIDC que emita el claim `groups`
+  # (`dex.config` en config/argo-cd/values.yaml, hoy comentado). Para dar acceso
+  # sin esperar al SSO se ata una cuenta local a este mismo rol desde
+  # `policy.csv`; ver docs/operar.md, "Quién puede entrar".
+  roles:
+    - name: developer
+      description: Sync y lectura sobre las Applications de dataspace-tck
+      policies:
+        - p, proj:dataspace-tck:developer, applications, get, dataspace-tck/*, allow
+        - p, proj:dataspace-tck:developer, applications, sync, dataspace-tck/*, allow
+        - p, proj:dataspace-tck:developer, logs, get, dataspace-tck/*, allow
+      groups:
+        - teo-devops/dataspaces
+
+  # Avisa (sin borrar) de recursos que existen en el namespace pero no están
+  # declarados en Git — el detector de `kubectl` clandestino.
+  orphanedResources:
+    warn: true

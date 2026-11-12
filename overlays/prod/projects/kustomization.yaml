@@ -8,6 +8,7 @@ namespace: argocd
 resources:
   - platform.yaml
   - api-demo.yaml
+  - dataspace-tck.yaml
   - wiki-demo.yaml
 
 # Los AppProject se crean antes que las Applications que los referencian: una

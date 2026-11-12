@@ -26,6 +26,7 @@ namespace: argocd
 # junto a estos ficheros, nunca uno global, y sin rehacer nada.
 resources:
   - api-demo.yaml
+  - dataspace-tck.yaml
   - wiki-demo.yaml
 
 commonAnnotations:
